@@ -1,0 +1,41 @@
+name,email,phone,roll_number,start_date,end_date,gender,course,branch
+Sample Student 01,sample001@example.com,+910009000001,UFSAMPLE001,2026-10-01,2027-01-31,Male,BTech,Computer Science
+Sample Student 02,sample002@example.com,+910009000002,UFSAMPLE002,2026-10-01,2027-01-31,Female,BTech,Electrical
+Sample Student 03,sample003@example.com,+910009000003,UFSAMPLE003,2026-10-01,2027-01-31,Male,BTech,Mechanical
+Sample Student 04,sample004@example.com,+910009000004,UFSAMPLE004,2026-10-01,2027-01-31,Female,MTech,Data Science
+Sample Student 05,sample005@example.com,+910009000005,UFSAMPLE005,2026-10-01,2027-01-31,Male,MSc,Physics
+Sample Student 06,sample006@example.com,+910009000006,UFSAMPLE006,2026-10-01,2027-01-31,Female,BTech,Computer Science
+Sample Student 07,sample007@example.com,+910009000007,UFSAMPLE007,2026-10-01,2027-01-31,Male,BTech,Electrical
+Sample Student 08,sample008@example.com,+910009000008,UFSAMPLE008,2026-10-01,2027-01-31,Female,BTech,Mechanical
+Sample Student 09,sample009@example.com,+910009000009,UFSAMPLE009,2026-10-01,2027-01-31,Male,MTech,Data Science
+Sample Student 10,sample010@example.com,+910009000010,UFSAMPLE010,2026-10-01,2027-01-31,Female,MSc,Physics
+Sample Student 11,sample011@example.com,+910009000011,UFSAMPLE011,2026-10-01,2027-01-31,Male,BTech,Computer Science
+Sample Student 12,sample012@example.com,+910009000012,UFSAMPLE012,2026-10-01,2027-01-31,Female,BTech,Electrical
+Sample Student 13,sample013@example.com,+910009000013,UFSAMPLE013,2026-10-01,2027-01-31,Male,BTech,Mechanical
+Sample Student 14,sample014@example.com,+910009000014,UFSAMPLE014,2026-10-01,2027-01-31,Female,MTech,Data Science
+Sample Student 15,sample015@example.com,+910009000015,UFSAMPLE015,2026-10-01,2027-01-31,Male,MSc,Physics
+Sample Student 16,sample016@example.com,+910009000016,UFSAMPLE016,2026-10-01,2027-01-31,Female,BTech,Computer Science
+Sample Student 17,sample017@example.com,+910009000017,UFSAMPLE017,2026-10-01,2027-01-31,Male,BTech,Electrical
+Sample Student 18,sample018@example.com,+910009000018,UFSAMPLE018,2026-10-01,2027-01-31,Female,BTech,Mechanical
+Sample Student 19,sample019@example.com,+910009000019,UFSAMPLE019,2026-10-01,2027-01-31,Male,MTech,Data Science
+Sample Student 20,sample020@example.com,+910009000020,UFSAMPLE020,2026-10-01,2027-01-31,Female,MSc,Physics
+Sample Student 21,sample021@example.com,+910009000021,UFSAMPLE021,2026-10-01,2027-01-31,Male,BTech,Computer Science
+Sample Student 22,sample022@example.com,+910009000022,UFSAMPLE022,2026-10-01,2027-01-31,Female,BTech,Electrical
+Sample Student 23,sample023@example.com,+910009000023,UFSAMPLE023,2026-10-01,2027-01-31,Male,BTech,Mechanical
+Sample Student 24,sample024@example.com,+910009000024,UFSAMPLE024,2026-10-01,2027-01-31,Female,MTech,Data Science
+Sample Student 25,sample025@example.com,+910009000025,UFSAMPLE025,2026-10-01,2027-01-31,Male,MSc,Physics
+Sample Student 26,sample026@example.com,+910009000026,UFSAMPLE026,2026-10-01,2027-01-31,Female,BTech,Computer Science
+Sample Student 27,sample027@example.com,+910009000027,UFSAMPLE027,2026-10-01,2027-01-31,Male,BTech,Electrical
+Sample Student 28,sample028@example.com,+910009000028,UFSAMPLE028,2026-10-01,2027-01-31,Female,BTech,Mechanical
+Sample Student 29,sample029@example.com,+910009000029,UFSAMPLE029,2026-10-01,2027-01-31,Male,MTech,Data Science
+Sample Student 30,sample030@example.com,+910009000030,UFSAMPLE030,2026-10-01,2027-01-31,Female,MSc,Physics
+Sample Student 31,sample031@example.com,+910009000031,UFSAMPLE031,2026-10-01,2027-01-31,Male,BTech,Computer Science
+Sample Student 32,sample032@example.com,+910009000032,UFSAMPLE032,2026-10-01,2027-01-31,Female,BTech,Electrical
+Sample Student 33,sample033@example.com,+910009000033,UFSAMPLE033,2026-10-01,2027-01-31,Male,BTech,Mechanical
+Sample Student 34,sample034@example.com,+910009000034,UFSAMPLE034,2026-10-01,2027-01-31,Female,MTech,Data Science
+Sample Student 35,sample035@example.com,+910009000035,UFSAMPLE035,2026-10-01,2027-01-31,Male,MSc,Physics
+Sample Student 36,sample036@example.com,+910009000036,UFSAMPLE036,2026-10-01,2027-01-31,Female,BTech,Computer Science
+Sample Student 37,sample037@example.com,+910009000037,UFSAMPLE037,2026-10-01,2027-01-31,Male,BTech,Electrical
+Sample Student 38,sample038@example.com,+910009000038,UFSAMPLE038,2026-10-01,2027-01-31,Female,BTech,Mechanical
+Sample Student 39,sample039@example.com,+910009000039,UFSAMPLE039,2026-10-01,2027-01-31,Male,MTech,Data Science
+Sample Student 40,sample040@example.com,+910009000040,UFSAMPLE040,2026-10-01,2027-01-31,Female,MSc,Physics

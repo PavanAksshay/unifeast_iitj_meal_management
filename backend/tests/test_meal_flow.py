@@ -1,5 +1,9 @@
+import csv
+import io
+import runpy
 import unittest
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
@@ -9,11 +13,13 @@ from sqlalchemy.orm import sessionmaker
 
 from app.main import (
     Allocation,
+    AuditLog,
     Base,
     Institution,
     MealSchedule,
     MealToken,
     MessUnit,
+    Rebate,
     StaffUser,
     Student,
     app,
@@ -80,6 +86,79 @@ class MealFlowTests(unittest.TestCase):
         collected = self.client.post(f"/api/v1/student/tokens/{reference}/collect", headers=headers)
         self.assertEqual(collected.status_code, 200, collected.text)
         self.assertEqual(self.client.post(f"/api/v1/student/tokens/{reference}/collect", headers=headers).status_code, 409)
+
+    def test_daily_meal_changes_are_isolated_and_can_be_restored(self):
+        admin = self.admin_headers()
+        tomorrow = (self.service_date + timedelta(days=1)).isoformat()
+        another_day = (self.service_date + timedelta(days=2)).isoformat()
+        body = {"service_date": tomorrow, "meal": "Special Lunch", "starts_at": "12:00", "ends_at": "14:00"}
+        response = self.client.post("/api/v1/admin/service-windows", headers=admin, json=body)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.client.post("/api/v1/admin/service-windows", headers=admin, json=body).status_code, 409)
+        body["ends_at"] = "15:00"
+        self.assertEqual(self.client.put("/api/v1/admin/service-windows", headers=admin, json=body).status_code, 200)
+        windows = self.client.get("/api/v1/admin/service-windows", headers=admin, params={"service_date": tomorrow}).json()
+        self.assertEqual(next(x for x in windows if x["meal"] == "Special Lunch")["ends_at"], "15:00")
+        other = self.client.get("/api/v1/admin/service-windows", headers=admin, params={"service_date": another_day}).json()
+        self.assertNotIn("Special Lunch", [x["meal"] for x in other])
+        self.assertEqual(self.client.delete("/api/v1/admin/service-windows", headers=admin, params={"service_date": tomorrow, "meal": "Breakfast"}).status_code, 200)
+        windows = self.client.get("/api/v1/admin/service-windows", headers=admin, params={"service_date": tomorrow}).json()
+        breakfast = next(x for x in windows if x["meal"] == "Breakfast")
+        self.assertTrue(breakfast["cancelled"])
+        self.assertFalse(next(x for x in other if x["meal"] == "Breakfast")["cancelled"])
+        restored = {"service_date": tomorrow, "meal": "Breakfast", "starts_at": breakfast["starts_at"], "ends_at": breakfast["ends_at"]}
+        self.assertEqual(self.client.put("/api/v1/admin/service-windows", headers=admin, json=restored).status_code, 200)
+        self.assertFalse(next(x for x in self.client.get("/api/v1/admin/service-windows", headers=admin, params={"service_date": tomorrow}).json() if x["meal"] == "Breakfast")["cancelled"])
+        self.assertEqual(self.client.post("/api/v1/admin/service-windows", headers={"X-Admin-Key": self.student_headers()["Authorization"].split()[1]}, json=body).status_code, 403)
+
+    def test_presence_records_confirmed_tokens_and_preserves_history(self):
+        admin, student = self.admin_headers(), self.student_headers()
+        with self.sessions() as db:
+            first = db.get(Student, self.student_id)
+            second = Student(institution_id=first.institution_id, unit_id=self.unit_id, name="Other Student", email="other@example.edu", phone="+910000000119", roll_number="T099", password_hash=hash_password("secret"), password_initialized=True)
+            db.add(second); db.flush()
+            db.add(Allocation(student_id=second.id, unit_id=self.unit_id, start_date=self.service_date, end_date=self.service_date, source_batch_id="test"))
+            db.commit()
+        params = {"start": self.service_date.isoformat(), "end": self.service_date.isoformat(), "meal": "Breakfast"}
+        issued = self.client.post("/api/v1/student/tokens", headers=student, json={"meal": "Breakfast"})
+        self.assertEqual(issued.status_code, 200, issued.text)
+        token = issued.json()["token"]
+        before = self.client.get("/api/v1/admin/presence", headers=admin, params=params).json()["records"]
+        self.assertTrue(all(row["status"] == "Pending" and row["token_reference"] is None for row in before))
+        collected = self.client.post(f"/api/v1/student/tokens/{token}/collect", headers=student)
+        self.assertEqual(collected.status_code, 200, collected.text)
+        with self.sessions() as db:
+            db.get(Student, self.student_id).name = "Renamed Student"
+            db.commit()
+        response = self.client.get("/api/v1/admin/presence", headers=admin, params=params)
+        self.assertEqual(response.status_code, 200, response.text)
+        rows = response.json()["records"]
+        done = next(row for row in rows if row["roll_number"] == "T001")
+        self.assertEqual(done["status"], "Collected")
+        self.assertEqual(done["student_name"], "Test Student")
+        self.assertEqual(done["token_reference"], token)
+        self.assertTrue(done["token_created_at"] and done["token_expires_at"] and done["collected_at"])
+        self.assertEqual(next(row for row in rows if row["roll_number"] == "T099")["status"], "Pending")
+        self.assertIn(token, self.client.get("/api/v1/admin/presence.csv", headers=admin, params=params).text)
+        self.assertEqual(self.client.get("/api/v1/admin/presence", headers=admin, params={**params, "start": (self.service_date-timedelta(days=31)).isoformat()}).status_code, 422)
+        self.assertEqual(self.client.delete("/api/v1/admin/service-windows", headers=admin, params={"service_date": params["start"], "meal": "Breakfast"}).status_code, 200)
+        rows = self.client.get("/api/v1/admin/presence", headers=admin, params=params).json()["records"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["token_reference"], token)
+
+    def test_removed_meal_cannot_be_collected_and_special_meal_can(self):
+        admin, student = self.admin_headers(), self.student_headers()
+        token = self.client.post("/api/v1/student/tokens", headers=student, json={"meal": "Breakfast"}).json()["token"]
+        today = self.service_date.isoformat()
+        self.assertEqual(self.client.delete("/api/v1/admin/service-windows", headers=admin, params={"service_date": today, "meal": "Breakfast"}).status_code, 200)
+        self.assertEqual(self.client.post(f"/api/v1/student/tokens/{token}/collect", headers=student).status_code, 409)
+        body = {"service_date": today, "meal": "Special Lunch", "starts_at": "00:00", "ends_at": "23:59"}
+        self.assertEqual(self.client.post("/api/v1/admin/service-windows", headers=admin, json=body).status_code, 200)
+        special = self.client.post("/api/v1/student/tokens", headers=student, json={"meal": "Special Lunch"})
+        self.assertEqual(special.status_code, 200, special.text)
+        self.assertEqual(self.client.post(f"/api/v1/student/tokens/{special.json()['token']}/collect", headers=student).status_code, 200)
+        response = self.client.get("/api/v1/admin/presence", headers=admin, params={"start": today, "end": today, "meal": "Special Lunch"})
+        self.assertEqual(response.json()["records"][0]["status"], "Collected")
 
     def test_unallocated_student_is_denied_token(self):
         with self.sessions() as db:
@@ -162,7 +241,97 @@ class MealFlowTests(unittest.TestCase):
         self.assertEqual(export.status_code, 200)
         self.assertIn("approved_rebate_days", export.text)
 
+    def test_admin_can_review_approve_and_reject_rebate_batches(self):
+        admin = self.admin_headers()
+        start = self.service_date.isoformat()
+        csv_data = f"roll_number,start_date,end_date,reason\nT001,{start},{start},Home visit\n"
+        preview = self.client.post("/api/v1/admin/rebates/preview", headers=admin, files={"file": ("requests.csv", csv_data, "text/csv")})
+        self.assertEqual(preview.status_code, 200, preview.text)
+        batch_id = preview.json()["batch_id"]
+
+        pending = self.client.get("/api/v1/admin/rebates/pending", headers=admin)
+        self.assertEqual(pending.status_code, 200, pending.text)
+        self.assertEqual(pending.json()[0]["rows"][0]["student_name"], "Test Student")
+        self.assertEqual(pending.json()[0]["rows"][0]["reason"], "Home visit")
+        student_token = self.client.post("/api/v1/auth/login", json={"identifier": "T001", "password": "secret"}).json()["access_token"]
+        self.assertEqual(self.client.get("/api/v1/admin/rebates/pending", headers={"X-Admin-Key": student_token}).status_code, 403)
+        self.assertEqual(self.client.post(f"/api/v1/admin/rebates/{batch_id}/approve", headers={"X-Admin-Key": student_token}).status_code, 403)
+
+        approved = self.client.post(f"/api/v1/admin/rebates/{batch_id}/approve?approver=someone-else", headers=admin)
+        self.assertEqual(approved.status_code, 200, approved.text)
+        self.assertEqual(approved.json()["approved_rows"], 1)
+        self.assertEqual(self.client.get("/api/v1/admin/rebates/pending", headers=admin).json(), [])
+        self.assertEqual(self.client.post(f"/api/v1/admin/rebates/{batch_id}/reject", headers=admin).status_code, 409)
+        with self.sessions() as db:
+            rebate = db.query(Rebate).filter_by(batch_id=batch_id).one()
+            audit = db.query(AuditLog).filter_by(record_id=batch_id, action="rebate.approved").one()
+            reviewer = db.query(StaffUser).filter_by(email="admin@unifeast.local").one()
+            self.assertEqual(rebate.approved_by, reviewer.email)
+            self.assertEqual(audit.actor, reviewer.id)
+
+        later = (self.service_date + timedelta(days=3)).isoformat()
+        rejected_csv = f"roll_number,start_date,end_date\nT001,{later},{later}\n"
+        second = self.client.post("/api/v1/admin/rebates/preview", headers=admin, files={"file": ("reject.csv", rejected_csv, "text/csv")}).json()["batch_id"]
+        rejected = self.client.post(f"/api/v1/admin/rebates/{second}/reject", headers=admin)
+        self.assertEqual(rejected.status_code, 200, rejected.text)
+        self.assertEqual(rejected.json()["status"], "rejected")
+        with self.sessions() as db:
+            self.assertEqual(db.query(Rebate).filter_by(batch_id=second).count(), 0)
+        self.assertEqual(self.client.post(f"/api/v1/admin/rebates/{second}/approve", headers=admin).status_code, 409)
+
+    def test_invalid_rebate_batch_can_be_reviewed_and_rejected_but_not_approved(self):
+        admin = self.admin_headers()
+        day = self.service_date.isoformat()
+        csv_data = f"roll_number,start_date,end_date\nT001,{day},{day}\nUNKNOWN,{day},{day}\n"
+        preview = self.client.post("/api/v1/admin/rebates/preview", headers=admin, files={"file": ("invalid.csv", csv_data, "text/csv")})
+        self.assertEqual(preview.status_code, 200, preview.text)
+        batch_id = preview.json()["batch_id"]
+        pending = self.client.get("/api/v1/admin/rebates/pending", headers=admin).json()[0]
+        self.assertEqual(pending["summary"]["invalid"], 1)
+        self.assertIn("not registered", pending["issues"][0]["message"])
+        self.assertEqual(self.client.post(f"/api/v1/admin/rebates/{batch_id}/approve", headers=admin).status_code, 409)
+        self.assertEqual(self.client.post(f"/api/v1/admin/rebates/{batch_id}/reject", headers=admin).status_code, 200)
+
+    def test_sample_files_support_mess_capacity_students_and_rebates(self):
+        sample_rows = runpy.run_path(str(Path(__file__).resolve().parents[2] / "scripts" / "generate_sample_data.py"))["sample_rows"]
+        student_rows, rebate_rows = sample_rows(self.service_date)
+
+        def as_csv(rows):
+            result = io.StringIO(newline="")
+            csv.writer(result).writerows(rows)
+            return result.getvalue().encode("utf-8")
+
+        admin = self.admin_headers()
+        preview = self.client.post("/api/v1/admin/allocations/preview", headers=admin, files={"file": ("students.csv", as_csv(student_rows), "text/csv")})
+        self.assertEqual(preview.status_code, 200, preview.text)
+        self.assertEqual(preview.json()["summary"]["valid"], 40)
+        self.assertEqual(preview.json()["summary"]["invalid"], 0)
+        batch = preview.json()["batch_id"]
+        confirmed = self.client.post(f"/api/v1/admin/allocations/{batch}/confirm?confirm=true", headers=admin)
+        self.assertEqual(confirmed.status_code, 200, confirmed.text)
+        self.assertEqual(confirmed.json()["students_imported"], 40)
+
+        capacity = self.client.put(f"/api/v1/admin/units/{self.unit_id}/capacity?capacity=50", headers=admin)
+        self.assertEqual(capacity.status_code, 200, capacity.text)
+        unit = self.client.get("/api/v1/admin/units", headers=admin).json()[0]
+        self.assertEqual(unit["students"], 41)
+        self.assertEqual(unit["occupancy_percent"], 82)
+
+        rebate = self.client.post("/api/v1/admin/rebates/preview", headers=admin, files={"file": ("rebates.csv", as_csv(rebate_rows), "text/csv")})
+        self.assertEqual(rebate.status_code, 200, rebate.text)
+        self.assertEqual(rebate.json()["summary"]["valid"], 10)
+        finance = self.admin_headers("finance")
+        approved = self.client.post(f"/api/v1/admin/rebates/{rebate.json()['batch_id']}/approve", headers={"X-Finance-Key": finance["X-Admin-Key"]})
+        self.assertEqual(approved.status_code, 200, approved.text)
+
+        start = (self.service_date - timedelta(days=14)).isoformat()
+        end = (self.service_date + timedelta(days=14)).isoformat()
+        analytics = self.client.get(f"/api/v1/admin/analytics?start={start}&end={end}", headers=admin)
+        self.assertEqual(analytics.status_code, 200, analytics.text)
+        self.assertEqual(analytics.json()["students_on_rebate"], 10)
+        self.assertEqual(analytics.json()["rebate_requests"], 10)
+        self.assertEqual(set(analytics.json()["demographics"]), {"gender", "course", "branch"})
+
 
 if __name__ == "__main__":
     unittest.main()
-

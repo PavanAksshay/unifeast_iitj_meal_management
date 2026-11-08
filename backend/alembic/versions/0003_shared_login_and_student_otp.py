@@ -22,4 +22,3 @@ def upgrade():
 
 def downgrade():
     raise RuntimeError("Identity setup history is retained; do not downgrade this standalone pilot database")
-

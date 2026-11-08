@@ -16,4 +16,3 @@ def upgrade():
 
 def downgrade():
     raise RuntimeError("Collection source history is retained; do not revert this workflow change")
-

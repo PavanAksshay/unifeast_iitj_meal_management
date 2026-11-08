@@ -27,6 +27,8 @@ The student and admin use the same login page.
 
 The OTP is displayed only in local development mode; no SMS provider is connected. First-time eligible students must take a selfie with the browser's front camera before the meal dashboard unlocks. Meal times are illustrative; an admin can set a window to the current Asia/Kolkata time for a live demo. Imported students complete OTP/password setup at first sign-in.
 
+For a larger test, download the fictional [40-student allocation file](frontend/sample-data/students.csv) and [10-request rebate file](frontend/sample-data/rebates.csv). The [mess testing guide](docs/mess-testing.md) explains how to set capacity, import the files, approve rebates, and try student sign-in. Run `python scripts/generate_sample_data.py` to refresh their dates.
+
 ## Student flow
 
 1. Sign in with registered phone/ID and OTP or an existing password.
@@ -39,8 +41,10 @@ The OTP is displayed only in local development mode; no SMS provider is connecte
 - Shared role-aware login screen; student OTP challenge with five-minute expiry and attempt limit; seeded admin and finance password accounts.
 - Allocation eligibility checked by the API; protected selfie storage and access; server-authoritative meal timing.
 - Numbered meal references expire after 15 minutes. Student-authenticated slider confirmation creates the unique served-meal record; duplicate collection is rejected.
-- The admin portal includes rebate CSV upload, validation preview, and import history. Finance signs in on the same page to review rebate periods and approve valid batches.
-- Allocation CSV preview/confirmation/history; rebate CSV preview and separate finance approval; billing snapshots computed from allocated days minus approved rebate days; approved CSV export. Meal scans are not billing inputs.
+- The admin portal includes rebate CSV upload, validation preview, and import history. Admin or finance staff can review each batch and approve or reject it.
+- The admin portal also includes searchable student allocation records, meal/rebate activity analytics, daily meal windows on the dashboard, and date/meal-filtered presence reports with CSV export. Presence is based on student-confirmed meal collection.
+- The admin UI includes a mess capacity and occupancy dashboard, MIS CSV downloads, student gender/course/branch breakdowns, individual student entry, metadata-aware bulk imports, admin/finance account creation and activation, weekly menu plans, rebate reason/frequency analytics, and a report builder with date presets and printable PDF output.
+- Allocation CSV preview/confirmation/history; rebate CSV preview and admin or finance approval; billing snapshots computed from allocated days minus approved rebate days; approved CSV export. Meal scans are not billing inputs.
 - Audit rows for sensitive MVP actions, meal timing configuration, student selfie, and meal collection.
 
 Run API tests from `backend` with `python -m unittest discover -s tests -v`.
@@ -55,12 +59,12 @@ OpenAPI is at `/docs`. Students use `Authorization: Bearer <access_token>`. Admi
 - `POST /api/v1/admin/allocations/preview`, `POST /api/v1/admin/allocations/{batch_id}/confirm`, `GET /api/v1/admin/allocations/history`
 - `POST /api/v1/admin/rebates/preview`, `POST /api/v1/admin/rebates/{batch_id}/approve`
 - `POST /api/v1/admin/billing/{YYYY-MM}/preview?daily_rate_paise=...`, `POST /api/v1/admin/billing/{cycle_id}/approve`, `GET /api/v1/admin/billing/{cycle_id}/export.csv`
+- Admin portal additions: `GET /api/v1/admin/analytics`, `GET /api/v1/admin/students`, `POST /api/v1/admin/students`, `GET /api/v1/admin/units`, `PUT /api/v1/admin/units/{unit_id}/capacity`, `GET/PUT /api/v1/admin/meal-plans`, `GET/POST/PATCH /api/v1/admin/users`, `GET /api/v1/admin/presence.csv`, and `GET /api/v1/admin/mis.csv`.
 
-Allocation CSV columns: `name,email,phone,roll_number,start_date,end_date`. Rebate CSV columns: `roll_number,start_date,end_date`. Import previews show validation issues and require explicit confirmation/approval.
+Allocation CSV required columns: `name,email,phone,roll_number,start_date,end_date`; optional student metadata columns: `gender,course,branch`. Rebate CSV required columns: `roll_number,start_date,end_date`; `reason` is optional. Import previews show validation issues and require explicit confirmation/approval.
 
 ## MVP limits
 
-This is not deployment-ready. OTP delivery is a development adapter; connect an approved SMS provider before a pilot. Staff account management, distinct institution/site/UniFeast roles, PDF exports, rebate revisions, billing adjustments, and automated photo retention/deletion are incomplete. No facial recognition is used. Future schema changes require explicit Alembic revisions.
+This is not deployment-ready. OTP delivery is a development adapter; connect an approved SMS provider before a pilot. Mess occupancy is calculated from active allocations and configured mess capacity. Report PDFs use the browser print dialog; report history is stored in the current browser. Institution/site/UniFeast role hierarchies, rebate revisions, billing adjustments, and automated photo retention/deletion are incomplete. No facial recognition is used. Future schema changes require explicit Alembic revisions.
 
 Existing repositories were inspected read-only. See [integration readiness](docs/integration-readiness.md) and [API examples](docs/api-examples.md).
-

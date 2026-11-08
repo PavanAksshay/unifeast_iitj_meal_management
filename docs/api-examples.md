@@ -40,7 +40,6 @@ The response includes the reference, student and meal details, server timestamp,
 
 ## Allocation, rebate, and billing
 
-Admin staff send their access token in `X-Admin-Key`; finance staff send theirs in `X-Finance-Key`. Allocation CSV columns are `name,email,phone,roll_number,start_date,end_date`; rebate CSV columns are `roll_number,start_date,end_date`. The portal includes rebate upload/preview/history and finance review/approval. Preview endpoints return a `batch_id`, validation issues, and a summary; confirmation/approval is a separate call.
+Admin staff send their access token in `X-Admin-Key`; finance staff send theirs in `X-Finance-Key`. Allocation CSV columns are `name,email,phone,roll_number,start_date,end_date`; rebate CSV columns are `roll_number,start_date,end_date`. Admin and finance staff can review pending rebate batches and approve or reject the entire upload. Preview endpoints return a `batch_id`, validation issues, and a summary; confirmation/approval is a separate call.
 
 Billing preview accepts a month and caller-supplied `daily_rate_paise`. It counts allocated days less unique approved rebate days, independently of meal collections. Only an approved immutable snapshot can be exported to CSV.
-

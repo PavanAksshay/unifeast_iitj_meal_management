@@ -18,4 +18,3 @@ def upgrade():
 
 def downgrade():
     raise RuntimeError("Initial schema downgrade is intentionally disabled to preserve pilot history")
-

@@ -15,7 +15,7 @@ This repository is standalone. No existing service, database, credential, or run
 2. Review each table against Core's naming, UUID, timestamp, tenancy, and migration conventions. Migrate institution, unit, student mapping, staff mapping, allocation batches/history, schedule, meal reference, serving, rebate, cycle snapshot, and audit entities with Alembic. Do not copy the standalone database wholesale.
 3. Store only foreign-key references to approved existing institution/unit/student records after an explicit mapping exercise. Never infer a match from email alone.
 4. Port the combined demo views into Admin navigation after choosing owners for allocations, schedules, operations, finance, and audit. The current UI is static HTML and is not a shared Admin component.
-5. Map staff roles individually. Administrators manage allocations and schedules; finance reviewers approve rebates and billing; students authenticate with the platform identity. Meal completion is confirmed by the student's authenticated slide after plate collection; this revised workflow has no counter login or confirmation.
+5. Map staff roles individually. Administrators manage allocations and schedules; administrators and finance reviewers can decide rebate batches; finance reviewers approve billing. Students authenticate with the platform identity. Meal completion is confirmed by the student's authenticated slide after plate collection; this revised workflow has no counter login or confirmation.
 6. Export only finalized student billing snapshots to the invoicing boundary. Reconcile billable allocated days and approved rebate days separately from meal scans to avoid counting meal transactions as billing events.
 7. Migrate historical data in dry-run batches with row counts, duplicate checks, allocation/rebate overlap reports, immutable source batch IDs, and signed reconciliation. Retain source records until approved validation completes.
 
@@ -26,4 +26,3 @@ Institution/unit/student ID mapping, auth and role mapping, database migration p
 ## Gaps to close
 
 The MVP has standalone Alembic migrations but no later schema revisions yet. It lacks production SMS delivery, full staff account/role management, UI forms for imports/rebate/billing, PDF statements, rebate corrections, billing adjustments, and automated photo deletion. The local demo passwords must never be reused in an integrated or deployed environment.
-

@@ -18,4 +18,3 @@ def upgrade():
 
 def downgrade():
     raise RuntimeError("Password hashes cannot be safely truncated")
-

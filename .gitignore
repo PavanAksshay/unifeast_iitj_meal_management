@@ -5,4 +5,4 @@ __pycache__/
 .next/
 node_modules/
 *.sqlite3
-
+backend/local_photos/
