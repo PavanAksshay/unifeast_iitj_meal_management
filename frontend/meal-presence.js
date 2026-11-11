@@ -1,7 +1,7 @@
 ﻿let serviceWindows = [];
 const adminHeaders = () => ({'X-Admin-Key': accessToken});
 async function adminJson(url, options = {}) {
-  const response = await fetch(API + url, {...options, headers: {...adminHeaders(), ...options.headers}});
+  const response = await apiFetch(API + url, {...options, headers: {...adminHeaders(), ...options.headers}});
   const data = await response.json();
   if (!response.ok) throw Error(typeof data.detail === 'string' ? data.detail : 'Please check the information and try again.');
   return data;
@@ -54,7 +54,7 @@ function parsePresenceCsv(text) {
   if(field||row.length){row.push(field);rows.push(row)}return rows;
 }
 async function generatePresenceReport(format,range,printWindow) {
-  const response=await fetch(API+'/admin/presence.csv?'+presenceParams(range),{headers:adminHeaders()});
+  const response=await apiFetch(API+'/admin/presence.csv?'+presenceParams(range),{headers:adminHeaders()});
   if(!response.ok){const d=await response.json();throw Error(d.detail||'Presence report unavailable')}
   const blob=await response.blob();
   if(format==='pdf'){

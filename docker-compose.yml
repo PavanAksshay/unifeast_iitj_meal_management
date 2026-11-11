@@ -21,10 +21,21 @@ services:
       STUDENT_DEMO_PASSWORD: ${STUDENT_DEMO_PASSWORD:-demo-student}
       ADMIN_DEMO_PASSWORD: ${ADMIN_DEMO_PASSWORD:-demo-admin}
       FINANCE_DEMO_PASSWORD: ${FINANCE_DEMO_PASSWORD:-demo-finance}
-      OTP_MODE: ${OTP_MODE:-development}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_SECURITY: ${SMTP_SECURITY:-starttls}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
       FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:3100}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
     ports:
-      - "8100:8100"
+      - "127.0.0.1:8100:8100"
     volumes:
       - iitj_meals_photos:/data/photos
     depends_on:
@@ -33,9 +44,10 @@ services:
   frontend:
     build: ./frontend
     ports:
-      - "3100:80"
+      - "127.0.0.1:3100:80"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
 volumes:
   iitj_meals_db:
   iitj_meals_photos:

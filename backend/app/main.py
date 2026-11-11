@@ -1,21 +1,26 @@
 from __future__ import annotations
 
+import csv
 import hashlib
 import hmac
-import csv
 import io
 import os
 import secrets
 import uuid
+from calendar import monthrange
+from collections import defaultdict
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy import JSON, Date, DateTime, ForeignKey, Integer, String, Time, UniqueConstraint, create_engine, func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+
+from app.email_otp import send_registration_code
 
 TZ = ZoneInfo("Asia/Kolkata")
 TOKEN_SECRET = os.getenv("TOKEN_SECRET", "local-only-change-me").encode()
@@ -83,6 +88,16 @@ class OTPChallenge(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(TZ))
+    setup_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
+
+
+class RememberedSession(Base):
+    __tablename__ = "remembered_sessions"
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    subject_id: Mapped[str] = mapped_column(String(36), index=True)
+    kind: Mapped[str] = mapped_column(String(12))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class Allocation(Base):
@@ -337,13 +352,18 @@ class LoginInput(BaseModel):
 
 
 class OTPRequest(BaseModel):
-    identifier: str
+    identifier: str = Field(min_length=5, max_length=254)
 
 
 class OTPVerify(BaseModel):
     challenge_id: str
     code: str = Field(pattern="^[0-9]{6}$")
-    new_password: str | None = Field(default=None, min_length=8, max_length=128)
+
+
+class PasswordSetup(BaseModel):
+    registration_token: str = Field(min_length=32, max_length=128)
+    password: str = Field(min_length=8, max_length=128)
+    confirm_password: str = Field(min_length=8, max_length=128)
 
 
 class TokenInput(BaseModel):
@@ -384,9 +404,9 @@ class StudentInput(BaseModel):
     roll_number: str = Field(min_length=2, max_length=64)
     start_date: date
     end_date: date
-    gender: str = ""
-    course: str = ""
-    branch: str = ""
+    gender: str = Field(default="", max_length=24)
+    course: str = Field(default="", max_length=120)
+    branch: str = Field(default="", max_length=120)
 
 
 def seed():
@@ -445,66 +465,170 @@ def health():
     return {"status": "ok", "service": "iitj-meals"}
 
 
+SESSION_COOKIE = "iitj-session"
+SESSION_PATH = "/api/v1/auth"
+SESSION_DAYS = 30
+
+
+@app.middleware("http")
+async def auth_response_policy(request: Request, call_next):
+    if request.url.path.startswith(SESSION_PATH + "/"):
+        origin = request.headers.get("origin")
+        allowed = {os.getenv("FRONTEND_ORIGIN", "http://localhost:3100").rstrip("/"), str(request.base_url).rstrip("/")}
+        if request.method == "POST" and origin and origin not in allowed:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"detail": "Open the sign-in page on this site to continue"}, status_code=403, headers={"Cache-Control": "no-store"})
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    return await call_next(request)
+
+
+def sign_in_result(account: Student | StaffUser) -> dict:
+    student = isinstance(account, Student)
+    role = "student" if student else account.role
+    user = {"name": account.name, "email": account.email}
+    if student:
+        user["roll_number"] = account.roll_number
+    return {"access_token": issue_session("student" if student else "staff", account.id, role), "token_type": "bearer", "role": role, "user": user}
+
+
+def remember_sign_in(account: Student | StaffUser, request: Request, response: Response, db: Session):
+    previous = request.cookies.get(SESSION_COOKIE)
+    if previous:
+        session = db.get(RememberedSession, digest(previous))
+        if session:
+            db.delete(session)
+    raw = secrets.token_urlsafe(32)
+    db.add(RememberedSession(token_hash=digest(raw), subject_id=account.id,
+                             kind="student" if isinstance(account, Student) else "staff",
+                             expires_at=datetime.now(TZ) + timedelta(days=SESSION_DAYS)))
+    response.set_cookie(SESSION_COOKIE, raw, max_age=SESSION_DAYS * 86400, httponly=True,
+                        secure=os.getenv("COOKIE_SECURE", "false").lower() == "true", samesite="strict", path=SESSION_PATH)
+
+
 @app.post("/api/v1/auth/login")
 @app.post("/api/v1/auth/student")
-def login(body: LoginInput, db: Session = Depends(get_db)):
+def login(body: LoginInput, request: Request, response: Response, db: Session = Depends(get_db)):
     identifier = body.identifier.strip()
     staff = db.scalar(select(StaffUser).where(StaffUser.email == identifier.lower())) if "@" in identifier else None
     if staff:
         if not staff.is_active or not password_matches(body.password, staff.password_hash):
             raise HTTPException(401, "Email or password is incorrect")
         staff.last_login_at = datetime.now(TZ)
+        remember_sign_in(staff, request, response, db)
         db.commit()
-        return {"access_token": issue_session("staff", staff.id, staff.role), "token_type": "bearer", "role": staff.role, "user": {"name": staff.name, "email": staff.email}}
+        return sign_in_result(staff)
     student = db.scalar(select(Student).where(or_(Student.phone == identifier, Student.roll_number == identifier.upper(), Student.email == identifier.lower())))
     if not student or not student.password_initialized:
-        raise HTTPException(403, "Use a one-time code to set up your student password")
+        raise HTTPException(403, "First-time students must verify their registered email and set a password")
     if not password_matches(body.password, student.password_hash):
-        raise HTTPException(401, "Phone/ID or password is incorrect")
-    return {"access_token": issue_session("student", student.id, "student"), "token_type": "bearer", "role": "student", "user": {"name": student.name, "email": student.email, "roll_number": student.roll_number}}
+        raise HTTPException(401, "Email or password is incorrect")
+    remember_sign_in(student, request, response, db)
+    db.commit()
+    return sign_in_result(student)
+
+
+@app.get("/api/v1/auth/session")
+def restore_session(request: Request, db: Session = Depends(get_db)):
+    raw = request.cookies.get(SESSION_COOKIE)
+    session = db.get(RememberedSession, digest(raw)) if raw else None
+    if not session or in_local_time(session.expires_at) <= datetime.now(TZ):
+        raise HTTPException(401, "Sign in to continue")
+    account = db.get(Student if session.kind == "student" else StaffUser, session.subject_id)
+    if not account or (isinstance(account, StaffUser) and not account.is_active) or (isinstance(account, Student) and not account.password_initialized):
+        raise HTTPException(401, "Sign in to continue")
+    return sign_in_result(account)
+
+
+@app.post("/api/v1/auth/logout")
+def sign_out(request: Request, response: Response, db: Session = Depends(get_db)):
+    raw = request.cookies.get(SESSION_COOKIE)
+    session = db.get(RememberedSession, digest(raw)) if raw else None
+    if session:
+        db.delete(session)
+        db.commit()
+    response.delete_cookie(SESSION_COOKIE, path=SESSION_PATH, httponly=True,
+                           secure=os.getenv("COOKIE_SECURE", "false").lower() == "true", samesite="strict")
+    return {"signed_out": True}
 
 
 @app.post("/api/v1/auth/otp/request")
 def request_student_otp(body: OTPRequest, db: Session = Depends(get_db)):
-    if os.getenv("OTP_MODE", "development") != "development":
-        raise HTTPException(503, "No SMS OTP provider is configured for this standalone build")
-    identifier = body.identifier.strip()
-    student = db.scalar(select(Student).where(or_(Student.phone == identifier, Student.roll_number == identifier.upper(), Student.email == identifier.lower())))
-    result = {"message": "If this phone or student ID is registered, a one-time code is ready in local demo mode.", "challenge_id": None, "development_code": None, "delivery": "local-demo"}
+    email = body.identifier.strip().lower()
+    if email.count("@") != 1 or any(character.isspace() for character in email):
+        raise HTTPException(422, "Enter the email address registered with your mess")
+    student = db.scalar(select(Student).where(Student.email == email).with_for_update())
     if not student:
-        return result
+        raise HTTPException(404, "This email is not in the student records. Contact the mess administrator.")
+    if student.password_initialized:
+        raise HTTPException(409, "Your account is already registered. Sign in with your email and password.")
+    now = datetime.now(TZ)
+    previous = db.scalars(select(OTPChallenge).where(OTPChallenge.student_id == student.id).with_for_update()).all()
+    if any(in_local_time(item.requested_at) > now - timedelta(seconds=60) for item in previous):
+        raise HTTPException(429, "Wait one minute before requesting another code")
     code = f"{secrets.randbelow(1_000_000):06d}"
-    challenge = OTPChallenge(id=str(uuid.uuid4()), student_id=student.id, code_hash=hmac.new(TOKEN_SECRET, f"{student.id}:{code}".encode(), hashlib.sha256).hexdigest(), expires_at=datetime.now(TZ) + timedelta(minutes=5), attempts=0)
+    challenge = OTPChallenge(id=str(uuid.uuid4()), student_id=student.id,
+                             code_hash=hmac.new(TOKEN_SECRET, f"{student.id}:{code}".encode(), hashlib.sha256).hexdigest(),
+                             expires_at=now + timedelta(minutes=5), requested_at=now, attempts=0)
+    send_registration_code(student.email, code)
+    for item in previous:
+        item.used_at = now
+        item.setup_token_hash = None
     db.add(challenge)
     db.commit()
-    result.update({"challenge_id": challenge.id, "development_code": code})
-    return result
+    return {"challenge_id": challenge.id, "delivery": "email", "message": "A verification code was sent to your registered email. It expires in 5 minutes."}
+
+
+def registration_challenge(db: Session, challenge: OTPChallenge | None) -> tuple[OTPChallenge, Student]:
+    if not challenge:
+        raise HTTPException(410, "Verification expired. Request a new email code.")
+    # Use the same student-then-challenge lock order as resend and password setup.
+    student = db.get(Student, challenge.student_id, with_for_update=True)
+    challenge = db.get(OTPChallenge, challenge.id, with_for_update=True, populate_existing=True)
+    if not student or student.password_initialized:
+        raise HTTPException(409, "Your account is already registered. Sign in with your email and password.")
+    if in_local_time(challenge.expires_at) <= datetime.now(TZ):
+        raise HTTPException(410, "Verification expired. Request a new email code.")
+    return challenge, student
 
 
 @app.post("/api/v1/auth/otp/verify")
 def verify_student_otp(body: OTPVerify, db: Session = Depends(get_db)):
-    challenge = db.get(OTPChallenge, body.challenge_id)
-    now = datetime.now(TZ)
-    if not challenge or challenge.used_at or in_local_time(challenge.expires_at) <= now:
-        raise HTTPException(410, "Code expired. Request a new one.")
+    challenge, student = registration_challenge(db, db.get(OTPChallenge, body.challenge_id))
+    if challenge.used_at:
+        raise HTTPException(410, "This code has already been used. Request a new email code.")
     if challenge.attempts >= 5:
-        raise HTTPException(429, "Too many attempts. Request a new code.")
+        raise HTTPException(429, "Too many attempts. Request a new email code.")
     challenge.attempts += 1
-    submitted = hmac.new(TOKEN_SECRET, f"{challenge.student_id}:{body.code}".encode(), hashlib.sha256).hexdigest()
+    submitted = hmac.new(TOKEN_SECRET, f"{student.id}:{body.code}".encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(submitted, challenge.code_hash):
         db.commit()
         raise HTTPException(401, "That code is not correct")
-    student = db.get(Student, challenge.student_id)
-    if not student.password_initialized and not body.new_password:
-        db.commit()
-        raise HTTPException(422, "Create a password to finish your first sign in")
-    if body.new_password:
-        student.password_hash = hash_password(body.new_password)
-        student.password_initialized = True
-    challenge.used_at = now
-    audit(db, student.id, "student.otp_login", challenge.id)
+    setup_token = secrets.token_urlsafe(32)
+    challenge.used_at = datetime.now(TZ)
+    challenge.expires_at = datetime.now(TZ) + timedelta(minutes=10)
+    challenge.setup_token_hash = digest(setup_token)
+    audit(db, student.id, "student.email_verified", challenge.id)
     db.commit()
-    return {"access_token": issue_session("student", student.id, "student"), "token_type": "bearer", "role": "student", "user": {"name": student.name, "email": student.email, "roll_number": student.roll_number}, "first_login": not bool(student.photo_key)}
+    return {"registration_token": setup_token, "password_setup_required": True}
+
+
+@app.post("/api/v1/auth/password/setup")
+def setup_student_password(body: PasswordSetup, request: Request, response: Response, db: Session = Depends(get_db)):
+    if body.password != body.confirm_password:
+        raise HTTPException(422, "Passwords do not match")
+    challenge = db.scalar(select(OTPChallenge).where(OTPChallenge.setup_token_hash == digest(body.registration_token)))
+    challenge, student = registration_challenge(db, challenge)
+    if not challenge.used_at or challenge.setup_token_hash != digest(body.registration_token):
+        raise HTTPException(410, "Email verification is required before setting a password")
+    student.password_hash = hash_password(body.password)
+    student.password_initialized = True
+    challenge.setup_token_hash = None
+    remember_sign_in(student, request, response, db)
+    audit(db, student.id, "student.password_initialized", challenge.id)
+    db.commit()
+    return sign_in_result(student)
 
 
 @app.get("/api/v1/student/me")
@@ -614,7 +738,7 @@ def confirm_collection(raw: str, authorization: str | None = Header(default=None
     audit(db, student.id, "meal.collected_by_student", token.id, {"meal": token.meal_type, "unit_id": student.unit_id})
     try:
         db.commit()
-    except Exception:
+    except IntegrityError:
         db.rollback()
         raise HTTPException(409, "This meal has already been marked collected")
     return {"status": "collected", "meal": token.meal_type, "collected_at": now.isoformat()}
@@ -629,6 +753,8 @@ def list_schedules(x_admin_key: str | None = Header(default=None), db: Session =
 @app.put("/api/v1/admin/schedules")
 def update_schedule(body: ScheduleInput, x_admin_key: str | None = Header(default=None), db: Session = Depends(get_db)):
     actor_id = require_key(x_admin_key, "ADMIN_DEMO_KEY", "demo-admin-key", "Administrator authentication failed", db)
+    if body.starts_at.tzinfo is not None or body.ends_at.tzinfo is not None:
+        raise HTTPException(422, "Use local mess times without a timezone offset")
     if body.ends_at <= body.starts_at:
         raise HTTPException(422, "End time must be later than start time")
     schedule = db.scalar(select(MealSchedule).where(MealSchedule.meal_type == body.meal))
@@ -660,6 +786,8 @@ def admin_service_windows(service_date: date, x_admin_key: str | None = Header(d
 def save_service_window(body: ServiceWindowInput, creating: bool, actor: str, db: Session) -> dict:
     if body.service_date < datetime.now(TZ).date():
         raise HTTPException(422, "Past meal service windows cannot be changed")
+    if body.starts_at.tzinfo is not None or body.ends_at.tzinfo is not None:
+        raise HTTPException(422, "Use local mess times without a timezone offset")
     if body.ends_at <= body.starts_at:
         raise HTTPException(422, "End time must be later than start time")
     unit = db.scalar(select(MessUnit).limit(1))
@@ -842,12 +970,15 @@ def admin_students(q: str = Query(default="", max_length=120), x_admin_key: str 
     rows = db.scalars(query.limit(5000)).all()
     allocations = db.scalars(select(Allocation).where(Allocation.student_id.in_([s.id for s in rows]))).all() if rows else []
     periods = {}
+    active = set()
     for allocation in allocations:
+        if allocation.start_date <= today <= allocation.end_date:
+            active.add((allocation.student_id, allocation.unit_id))
         item = periods.setdefault(allocation.student_id, {"start": allocation.start_date, "end": allocation.end_date})
         item["start"] = min(item["start"], allocation.start_date)
         item["end"] = max(item["end"], allocation.end_date)
     return [{"name": s.name, "roll_number": s.roll_number, "email": s.email, "phone": s.phone,
-             "active": has_allocation(db, s, today), "unit": db.get(MessUnit, s.unit_id).name if db.get(MessUnit, s.unit_id) else "—",
+             "active": (s.id, s.unit_id) in active, "unit": db.get(MessUnit, s.unit_id).name if db.get(MessUnit, s.unit_id) else "—",
              "gender": s.gender or "", "course": s.course or "", "branch": s.branch or "",
              "allocation_start": periods[s.id]["start"].isoformat() if s.id in periods else "", "allocation_end": periods[s.id]["end"].isoformat() if s.id in periods else ""} for s in rows]
 
@@ -858,9 +989,9 @@ def create_student(body: StudentInput, x_admin_key: str | None = Header(default=
     if body.end_date < body.start_date:
         raise HTTPException(422, "Allocation end date must be on or after its start date")
     email, roll, phone = body.email.strip().lower(), body.roll_number.strip().upper(), body.phone.strip()
+    unit = db.scalar(select(MessUnit).limit(1).with_for_update())
     if "@" not in email or db.scalar(select(Student.id).where(or_(Student.email == email, Student.roll_number == roll, Student.phone == phone))):
         raise HTTPException(409, "Check the email, roll number, and phone; one may already be registered")
-    unit = db.scalar(select(MessUnit).limit(1))
     institution = db.get(Institution, unit.institution_id)
     student = Student(institution_id=institution.id, unit_id=unit.id, name=body.name.strip(), email=email, phone=phone,
                       roll_number=roll, password_hash=hash_password(secrets.token_urlsafe(24)), password_initialized=False,
@@ -1088,15 +1219,20 @@ def parse_csv(file: UploadFile, content: bytes, required: set[str]) -> list[dict
     if len(content) > 5 * 1024 * 1024:
         raise HTTPException(413, "CSV must be 5 MB or smaller")
     try:
-        reader = csv.DictReader(io.StringIO(content.decode("utf-8-sig")))
+        reader = csv.DictReader(io.StringIO(content.decode("utf-8-sig"), newline=""), strict=True)
     except UnicodeDecodeError:
         raise HTTPException(422, "CSV must use UTF-8 encoding")
-    headers = {h.strip().lower() for h in (reader.fieldnames or []) if h}
-    if not required.issubset(headers):
-        raise HTTPException(422, f"CSV needs these columns: {', '.join(sorted(required))}")
-    normalized = []
-    for row in reader:
-        normalized.append({(k or "").strip().lower(): (v or "").strip() for k, v in row.items()})
+    try:
+        headers = {h.strip().lower() for h in (reader.fieldnames or []) if h}
+        if not required.issubset(headers):
+            raise HTTPException(422, f"CSV needs these columns: {', '.join(sorted(required))}")
+        normalized = []
+        for row in reader:
+            if None in row:
+                raise HTTPException(422, f"CSV line {reader.line_num} has more fields than the header")
+            normalized.append({k.strip().lower(): (v or "").strip() for k, v in row.items()})
+    except csv.Error as error:
+        raise HTTPException(422, f"Invalid CSV near line {reader.line_num}: {error}") from error
     if not normalized:
         raise HTTPException(422, "CSV contains no data rows")
     return normalized
@@ -1107,8 +1243,7 @@ def month_bounds(month: str) -> tuple[date, date]:
         start = date.fromisoformat(month + "-01")
     except ValueError:
         raise HTTPException(422, "Month must use YYYY-MM format")
-    end = (start.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
-    return start, end
+    return start, start.replace(day=monthrange(start.year, start.month)[1])
 
 
 @app.post("/api/v1/admin/allocations/preview")
@@ -1124,6 +1259,8 @@ def allocation_preview(file: UploadFile = File(...), x_admin_key: str | None = H
                 raise ValueError("name, email, phone and roll_number must be valid")
             if end < start:
                 raise ValueError("end_date precedes start_date")
+            if len(name) > 160 or len(email) > 254 or len(roll) > 64:
+                raise ValueError("name, email or roll number exceeds the supported length")
             if len(phone) < 7 or len(phone) > 20:
                 raise ValueError("phone must contain 7 to 20 characters")
             if email in seen_email or roll in seen_roll or phone in seen_phone:
@@ -1145,7 +1282,8 @@ def allocation_preview(file: UploadFile = File(...), x_admin_key: str | None = H
         raise HTTPException(422, {"message": "No valid allocation rows", "issues": issues})
     unit_id = db.scalar(select(MessUnit.id).limit(1))
     prev_start = min(date.fromisoformat(r["start_date"]) for r in valid)
-    previous = db.scalars(select(Allocation).where(Allocation.unit_id == unit_id, Allocation.start_date < prev_start, Allocation.end_date >= prev_start - timedelta(days=35))).all()
+    lookback = date.fromordinal(max(date.min.toordinal(), prev_start.toordinal() - 35))
+    previous = db.scalars(select(Allocation).where(Allocation.unit_id == unit_id, Allocation.start_date < prev_start, Allocation.end_date >= lookback)).all()
     prev_students = {a.student_id: db.get(Student, a.student_id) for a in previous}
     incoming_rolls = {r["roll_number"] for r in valid}
     previous_rolls = {s.roll_number for s in prev_students.values() if s}
@@ -1162,22 +1300,24 @@ def allocation_preview(file: UploadFile = File(...), x_admin_key: str | None = H
 @app.post("/api/v1/admin/allocations/{batch_id}/confirm")
 def allocation_confirm(batch_id: str, confirm: bool = False, x_admin_key: str | None = Header(default=None), db: Session = Depends(get_db)):
     require_key(x_admin_key, "ADMIN_DEMO_KEY", "demo-admin-key", "Administrator authentication failed", db)
-    batch = db.get(ImportBatch, batch_id)
+    batch = db.get(ImportBatch, batch_id, with_for_update=True)
     if not batch or batch.kind != "allocation":
         raise HTTPException(404, "Allocation import not found")
     if not confirm:
         raise HTTPException(400, "Set confirm=true after reviewing the preview")
     if batch.status != "preview" or batch.issues:
         raise HTTPException(409, "Only a clean, unconfirmed preview can be imported")
-    unit = db.scalar(select(MessUnit).limit(1))
+    unit = db.scalar(select(MessUnit).limit(1).with_for_update())
     institution = db.get(Institution, unit.institution_id)
     for row in batch.rows:
-        student = db.scalar(select(Student).where(Student.roll_number == row["roll_number"]))
+        start, end = date.fromisoformat(row["start_date"]), date.fromisoformat(row["end_date"])
+        conflicts = db.scalars(select(Student).where(or_(Student.roll_number == row["roll_number"], Student.email == row["email"], Student.phone == row["phone"]))).all()
+        student = next((owner for owner in conflicts if owner.roll_number == row["roll_number"]), None)
+        if any(owner is not student for owner in conflicts) or (student and student.unit_id != unit.id):
+            raise HTTPException(409, f"Student details changed after preview: {row['roll_number']}")
         if student:
-            email_owner = db.scalar(select(Student).where(Student.email == row["email"], Student.id != student.id))
-            phone_owner = db.scalar(select(Student).where(Student.phone == row["phone"], Student.id != student.id))
-            if student.unit_id != unit.id or email_owner or phone_owner:
-                raise HTTPException(409, f"Student details changed after preview: {row['roll_number']}")
+            if db.scalar(select(Allocation.id).where(Allocation.student_id == student.id, Allocation.unit_id == unit.id, Allocation.start_date <= end, Allocation.end_date >= start)):
+                raise HTTPException(409, f"An allocation now overlaps this import: {row['roll_number']}")
             student.name, student.email, student.phone = row["name"], row["email"], row["phone"]
             for field in ("gender", "course", "branch"):
                 if row.get(field):
@@ -1186,7 +1326,7 @@ def allocation_confirm(batch_id: str, confirm: bool = False, x_admin_key: str | 
             student = Student(institution_id=institution.id, unit_id=unit.id, name=row["name"], email=row["email"], roll_number=row["roll_number"], phone=row["phone"], password_hash=hash_password(secrets.token_urlsafe(24)), gender=row.get("gender") or None, course=row.get("course") or None, branch=row.get("branch") or None)
             db.add(student)
             db.flush()
-        db.add(Allocation(student_id=student.id, unit_id=unit.id, start_date=date.fromisoformat(row["start_date"]), end_date=date.fromisoformat(row["end_date"]), source_batch_id=batch.id))
+        db.add(Allocation(student_id=student.id, unit_id=unit.id, start_date=start, end_date=end, source_batch_id=batch.id))
     batch.status, batch.confirmed_at = "confirmed", datetime.now(TZ)
     audit(db, "demo-site-admin", "allocation.confirmed", batch.id, {"students_imported": len(batch.rows)})
     db.commit()
@@ -1317,15 +1457,22 @@ def reject_rebates(batch_id: str, x_admin_key: str | None = Header(default=None)
 def billing_preview(month: str, daily_rate_paise: int = Query(default=0, ge=0, le=100000000), x_finance_key: str | None = Header(default=None), db: Session = Depends(get_db)):
     require_key(x_finance_key, "FINANCE_DEMO_KEY", "demo-finance-key", "Finance reviewer authentication failed", db)
     start, end = month_bounds(month)
-    unit = db.scalar(select(MessUnit).limit(1))
+    unit = db.scalar(select(MessUnit).limit(1).with_for_update())
     students = db.scalars(select(Student).where(Student.unit_id == unit.id)).all()
+    allocations_by_student = defaultdict(list)
+    for allocation in db.scalars(select(Allocation).where(Allocation.unit_id == unit.id, Allocation.start_date <= end, Allocation.end_date >= start)):
+        allocations_by_student[allocation.student_id].append(allocation)
+    rebates_by_student = defaultdict(list)
+    for rebate in db.scalars(select(Rebate).where(Rebate.unit_id == unit.id, Rebate.start_date <= end, Rebate.end_date >= start)):
+        rebates_by_student[rebate.student_id].append(rebate)
+    days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
     snapshot = []
     for student in students:
-        allocations = db.scalars(select(Allocation).where(Allocation.student_id == student.id, Allocation.unit_id == unit.id, Allocation.start_date <= end, Allocation.end_date >= start)).all()
-        allocated_days = {start + timedelta(days=i) for i in range((end - start).days + 1) if any(a.start_date <= start + timedelta(days=i) <= a.end_date for a in allocations)}
-        if not allocated_days:
+        allocations = allocations_by_student.get(student.id, ())
+        if not allocations:
             continue
-        rebates = db.scalars(select(Rebate).where(Rebate.student_id == student.id, Rebate.unit_id == unit.id, Rebate.start_date <= end, Rebate.end_date >= start)).all()
+        allocated_days = {day for day in days if any(a.start_date <= day <= a.end_date for a in allocations)}
+        rebates = rebates_by_student.get(student.id, ())
         rebate_days = {day for day in allocated_days if any(r.start_date <= day <= r.end_date for r in rebates)}
         billable = len(allocated_days) - len(rebate_days)
         snapshot.append({"student_id": student.id, "roll_number": student.roll_number, "name": student.name, "eligible_allocated_days": len(allocated_days), "approved_rebate_days": len(rebate_days), "billable_days": billable, "amount_paise": billable * daily_rate_paise})
@@ -1351,7 +1498,7 @@ def billing_cycles(x_finance_key: str | None = Header(default=None), db: Session
 @app.post("/api/v1/admin/billing/{cycle_id}/approve")
 def approve_billing(cycle_id: str, approver: str = "demo-finance-reviewer", x_finance_key: str | None = Header(default=None), db: Session = Depends(get_db)):
     require_key(x_finance_key, "FINANCE_DEMO_KEY", "demo-finance-key", "Finance reviewer authentication failed", db)
-    cycle = db.get(BillingCycle, cycle_id)
+    cycle = db.get(BillingCycle, cycle_id, with_for_update=True)
     if not cycle:
         raise HTTPException(404, "Billing cycle not found")
     if cycle.status != "preview":

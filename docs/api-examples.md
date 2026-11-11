@@ -1,6 +1,6 @@
 # API examples
 
-All service dates and meal times use `Asia/Kolkata`. Student and staff sign-in share `/api/v1/auth/login`; role and user details determine the portal. In local development only, the OTP request response includes a `development_code` because no SMS provider is connected.
+All service dates and meal times use `Asia/Kolkata`. Student and staff sign-in share `/api/v1/auth/login`; role and user details determine the portal. Registration codes are emailed through configured SMTP. The response contains a challenge ID. Configure SMTP before requesting a code.
 
 ## Student password sign-in
 
@@ -8,10 +8,10 @@ All service dates and meal times use `Asia/Kolkata`. Student and staff sign-in s
 POST /api/v1/auth/login
 Content-Type: application/json
 
-{"identifier":"+910000000001","password":"demo-student"}
+{"identifier":"student@iitj.ac.in","password":"demo-student"}
 ```
 
-Students can identify with a registered phone number, roll/student ID, or email. Admin staff use their account email and their own password on the same endpoint.
+The portal uses email and password. The API also accepts registered student phone numbers and IDs for existing clients. Admin staff use their account email and their own password on the same endpoint.
 
 ## First student sign-in by OTP
 
@@ -19,10 +19,36 @@ Students can identify with a registered phone number, roll/student ID, or email.
 POST /api/v1/auth/otp/request
 Content-Type: application/json
 
-{"identifier":"B23CS000"}
+{"identifier":"firstlogin@iitj.ac.in"}
 ```
 
-Pass the returned `challenge_id` and local `development_code` to `/api/v1/auth/otp/verify`. A first-login student also supplies `new_password` (minimum eight characters). OTPs expire in five minutes and allow at most five tries. The demo code is not sent by SMS.
+Submit the returned `challenge_id` and the code received by email.
+
+```http
+POST /api/v1/auth/otp/verify
+Content-Type: application/json
+
+{"challenge_id":"<challenge_id>","code":"123456"}
+```
+
+Codes expire in five minutes and allow five attempts. A new code invalidates the
+previous one and requires a one-minute wait. Verification returns a
+`registration_token`, which permits password setup for ten minutes.
+
+```http
+POST /api/v1/auth/password/setup
+Content-Type: application/json
+
+{"registration_token":"<registration_token>","password":"a-new-password","confirm_password":"a-new-password"}
+```
+
+Both passwords must match and contain 8–128 characters. Successful setup signs
+the student in. Already registered users sign in using email and password.
+
+Password sign-in and successful password setup also set a 30-day HttpOnly,
+SameSite cookie. Browsers restore their sign-in through `GET /api/v1/auth/session`
+and revoke it with `POST /api/v1/auth/logout`. API clients can continue using the
+returned access token. All authentication responses use `Cache-Control: no-store`.
 
 ## Selfie and meals
 

@@ -2,6 +2,7 @@ import csv
 import io
 import runpy
 import unittest
+from unittest.mock import patch
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -20,6 +21,8 @@ from app.main import (
     MealToken,
     MessUnit,
     Rebate,
+    OTPChallenge,
+    RememberedSession,
     StaffUser,
     Student,
     app,
@@ -169,21 +172,117 @@ class MealFlowTests(unittest.TestCase):
         denied = self.client.post("/api/v1/student/tokens", headers=headers, json={"meal": "Breakfast"})
         self.assertEqual(denied.status_code, 403)
 
-    def test_first_login_otp_sets_student_password(self):
+    def first_login_student(self):
         with self.sessions() as db:
             institute = db.query(Institution).first()
-            db.add(Student(institution_id=institute.id, unit_id=self.unit_id, name="First Login", email="first@example.edu", phone="+910000000114", roll_number="T003", password_hash=hash_password("unknown-random"), password_initialized=False))
+            student = Student(institution_id=institute.id, unit_id=self.unit_id, name="First Login", email="first@example.edu", phone="+910000000114", roll_number="T003", password_hash=hash_password("unknown-random"), password_initialized=False)
+            db.add(student)
             db.commit()
-        requested = self.client.post("/api/v1/auth/otp/request", json={"identifier": "T003"})
-        self.assertEqual(requested.status_code, 200)
-        challenge = requested.json()
-        first_try = self.client.post("/api/v1/auth/otp/verify", json={"challenge_id": challenge["challenge_id"], "code": challenge["development_code"]})
-        self.assertEqual(first_try.status_code, 422)
-        setup = self.client.post("/api/v1/auth/otp/verify", json={"challenge_id": challenge["challenge_id"], "code": challenge["development_code"], "new_password": "new-secure-password"})
+        return student.id
+
+    def request_email_code(self):
+        with patch("app.main.send_registration_code") as send:
+            requested = self.client.post("/api/v1/auth/otp/request", json={"identifier": "first@example.edu"})
+        self.assertEqual(requested.status_code, 200, requested.text)
+        email, code = send.call_args.args
+        self.assertEqual(email, "first@example.edu")
+        self.assertNotIn(code, requested.text)
+        self.assertNotIn("development_code", requested.json())
+        return requested.json()["challenge_id"], code
+
+    def verify_email(self, challenge_id, code):
+        result = self.client.post("/api/v1/auth/otp/verify", json={"challenge_id": challenge_id, "code": code})
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertNotIn("access_token", result.json())
+        return result.json()["registration_token"]
+
+    def test_first_login_email_verification_then_confirmed_password(self):
+        student_id = self.first_login_student()
+        challenge_id, code = self.request_email_code()
+        token = self.verify_email(challenge_id, code)
+        self.assertEqual(self.client.get("/api/v1/auth/session").status_code, 401)
+        with self.sessions() as db:
+            self.assertFalse(db.get(Student, student_id).password_initialized)
+        mismatched = self.client.post("/api/v1/auth/password/setup", json={"registration_token": token, "password": "new-secure-password", "confirm_password": "different-password"})
+        self.assertEqual(mismatched.status_code, 422)
+        body = {"registration_token": token, "password": "new-secure-password", "confirm_password": "new-secure-password"}
+        setup = self.client.post("/api/v1/auth/password/setup", json=body)
         self.assertEqual(setup.status_code, 200, setup.text)
-        signed_in = self.client.post("/api/v1/auth/login", json={"identifier": "T003", "password": "new-secure-password"})
-        self.assertEqual(signed_in.status_code, 200)
-        self.assertEqual(signed_in.json()["role"], "student")
+        self.assertEqual(self.client.get("/api/v1/auth/session").status_code, 200)
+        self.assertEqual(self.client.post("/api/v1/auth/password/setup", json=body).status_code, 410)
+        self.assertEqual(self.client.post("/api/v1/auth/login", json={"identifier": "first@example.edu", "password": body["password"]}).status_code, 200)
+        with self.sessions() as db:
+            self.assertNotEqual(db.get(Student, student_id).password_hash, body["password"])
+
+    def test_password_setup_requires_verified_unexpired_email(self):
+        self.first_login_student()
+        challenge_id, code = self.request_email_code()
+        body = {"registration_token": "x" * 43, "password": "new-secure-password", "confirm_password": "new-secure-password"}
+        self.assertEqual(self.client.post("/api/v1/auth/password/setup", json=body).status_code, 410)
+        token = self.verify_email(challenge_id, code)
+        replay = self.client.post("/api/v1/auth/otp/verify", json={"challenge_id": challenge_id, "code": code})
+        self.assertEqual(replay.status_code, 410)
+        with self.sessions() as db:
+            db.get(OTPChallenge, challenge_id).expires_at = datetime.now(ZoneInfo("Asia/Kolkata")) - timedelta(seconds=1)
+            db.commit()
+        body["registration_token"] = token
+        self.assertEqual(self.client.post("/api/v1/auth/password/setup", json=body).status_code, 410)
+
+    def test_email_attempt_limit_resend_and_existing_accounts(self):
+        self.first_login_student()
+        challenge_id, code = self.request_email_code()
+        self.assertEqual(self.client.post("/api/v1/auth/otp/request", json={"identifier": "first@example.edu"}).status_code, 429)
+        wrong = "000000" if code != "000000" else "111111"
+        for _ in range(5):
+            self.assertEqual(self.client.post("/api/v1/auth/otp/verify", json={"challenge_id": challenge_id, "code": wrong}).status_code, 401)
+        self.assertEqual(self.client.post("/api/v1/auth/otp/verify", json={"challenge_id": challenge_id, "code": code}).status_code, 429)
+        with self.sessions() as db:
+            db.get(OTPChallenge, challenge_id).requested_at -= timedelta(minutes=2)
+            db.commit()
+        new_id, new_code = self.request_email_code()
+        self.assertEqual(self.client.post("/api/v1/auth/otp/verify", json={"challenge_id": challenge_id, "code": code}).status_code, 410)
+        self.verify_email(new_id, new_code)
+        self.assertEqual(self.client.post("/api/v1/auth/otp/request", json={"identifier": "test@example.edu"}).status_code, 409)
+
+    def test_unconfigured_email_does_not_issue_a_challenge(self):
+        self.first_login_student()
+        with patch.dict("os.environ", {"SMTP_HOST": "", "SMTP_FROM": ""}):
+            result = self.client.post("/api/v1/auth/otp/request", json={"identifier": "first@example.edu"})
+        self.assertEqual(result.status_code, 503)
+        with self.sessions() as db:
+            self.assertEqual(db.query(OTPChallenge).count(), 0)
+
+    def test_remembered_cookie_expiry_logout_and_no_password(self):
+        login = self.client.post("/api/v1/auth/login", json={"identifier": "test@example.edu", "password": "secret"})
+        self.assertEqual(login.status_code, 200)
+        cookie = login.headers["set-cookie"]
+        self.assertIn("HttpOnly", cookie)
+        self.assertIn("SameSite=strict", cookie)
+        self.assertIn("Max-Age=2592000", cookie)
+        self.assertNotIn("secret", cookie)
+        self.assertEqual(login.headers["cache-control"], "no-store")
+        raw = self.client.cookies.get("iitj-session")
+        with self.sessions() as db:
+            self.assertIsNotNone(db.get(RememberedSession, digest(raw)))
+            self.assertIsNone(db.get(RememberedSession, raw))
+        self.assertEqual(self.client.get("/api/v1/auth/session").status_code, 200)
+        with self.sessions() as db:
+            db.get(RememberedSession, digest(raw)).expires_at = datetime.now(ZoneInfo("Asia/Kolkata")) - timedelta(seconds=1)
+            db.commit()
+        self.assertEqual(self.client.get("/api/v1/auth/session").status_code, 401)
+        self.client.post("/api/v1/auth/login", json={"identifier": "test@example.edu", "password": "secret"})
+        raw = self.client.cookies.get("iitj-session")
+        self.assertEqual(self.client.post("/api/v1/auth/logout").status_code, 200)
+        self.client.cookies.set("iitj-session", raw)
+        self.assertEqual(self.client.get("/api/v1/auth/session").status_code, 401)
+
+    def test_disabled_staff_cannot_restore_session_and_foreign_origin_is_blocked(self):
+        self.admin_headers()
+        with self.sessions() as db:
+            db.query(StaffUser).filter_by(email="admin@unifeast.local").first().is_active = False
+            db.commit()
+        self.assertEqual(self.client.get("/api/v1/auth/session").status_code, 401)
+        self.assertEqual(self.client.post("/api/v1/auth/logout", headers={"Origin": "https://another.example"}).status_code, 403)
 
     def test_admin_uses_same_login_and_own_password(self):
         login = self.client.post("/api/v1/auth/login", json={"identifier": "admin@unifeast.local", "password": "demo-admin"})
@@ -214,6 +313,29 @@ class MealFlowTests(unittest.TestCase):
         confirmed = self.client.post(f"/api/v1/admin/allocations/{batch_id}/confirm?confirm=true", headers=admin)
         self.assertEqual(confirmed.status_code, 200, confirmed.text)
         self.assertEqual(confirmed.json()["students_imported"], 1)
+
+    def test_allocation_preview_rejects_malformed_csv(self):
+        today = self.service_date.isoformat()
+        header = "name,email,phone,roll_number,start_date,end_date\n"
+        extra = f"Student,new@example.edu,+910000000113,T003,{today},{today},extra\n"
+        admin = self.admin_headers()
+        for row in (extra, '"unclosed', 'X' * 131073):
+            with self.subTest(row_size=len(row)):
+                response = self.client.post("/api/v1/admin/allocations/preview", headers=admin, files={"file": ("allocation.csv", header + row, "text/csv")})
+                self.assertEqual(response.status_code, 422, response.text)
+
+    def test_allocation_confirmation_rechecks_overlaps_after_preview(self):
+        today = self.service_date.isoformat()
+        csv_data = f"name,email,phone,roll_number,start_date,end_date\nNew Student,new@example.edu,+910000000113,T003,{today},{today}\n"
+        admin = self.admin_headers()
+        batch_ids = []
+        for _ in range(2):
+            response = self.client.post("/api/v1/admin/allocations/preview", headers=admin, files={"file": ("allocation.csv", csv_data, "text/csv")})
+            self.assertEqual(response.status_code, 200, response.text)
+            batch_ids.append(response.json()["batch_id"])
+        for batch_id, expected in zip(batch_ids, (200, 409)):
+            response = self.client.post(f"/api/v1/admin/allocations/{batch_id}/confirm?confirm=true", headers=admin)
+            self.assertEqual(response.status_code, expected, response.text)
 
     def test_rebate_approval_reduces_billing_days_and_exports_approved_snapshot(self):
         start = self.service_date.isoformat()

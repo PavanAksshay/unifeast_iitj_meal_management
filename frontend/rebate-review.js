@@ -45,7 +45,7 @@ async function loadPendingRebates() {
   const target = document.getElementById(userRole === 'admin' ? 'admin-rebate-review' : 'finance-rebates');
   if (!target) return;
   try {
-    const response = await fetch(API + '/admin/rebates/pending', { headers: rebateReviewHeaders() });
+    const response = await apiFetch(API + '/admin/rebates/pending', { headers: rebateReviewHeaders() });
     const batches = await response.json();
     if (!response.ok) throw Error(batches.detail || 'Could not load rebate reviews');
     renderRebateReviews(batches, target);
@@ -69,7 +69,7 @@ async function decideRebate(button, action) {
   const previouslyDisabled = controls.map(control => control.disabled);
   controls.forEach(control => { control.disabled = true; });
   try {
-    const response = await fetch(API + '/admin/rebates/' + encodeURIComponent(batch) + '/' + action, {
+    const response = await apiFetch(API + '/admin/rebates/' + encodeURIComponent(batch) + '/' + action, {
       method: 'POST', headers: rebateReviewHeaders(),
     });
     const data = await response.json();
