@@ -97,7 +97,6 @@ class RememberedSession(Base):
     token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     subject_id: Mapped[str] = mapped_column(String(36), index=True)
     kind: Mapped[str] = mapped_column(String(12))
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class Allocation(Base):
@@ -467,7 +466,7 @@ def health():
 
 SESSION_COOKIE = "iitj-session"
 SESSION_PATH = "/api/v1/auth"
-SESSION_DAYS = 30
+COOKIE_MAX_AGE = 400 * 86400  # Browsers cap persistent cookies at 400 days; renew on restore.
 
 
 @app.middleware("http")
@@ -493,6 +492,11 @@ def sign_in_result(account: Student | StaffUser) -> dict:
     return {"access_token": issue_session("student" if student else "staff", account.id, role), "token_type": "bearer", "role": role, "user": user}
 
 
+def set_session_cookie(response: Response, raw: str):
+    response.set_cookie(SESSION_COOKIE, raw, max_age=COOKIE_MAX_AGE, httponly=True,
+                        secure=os.getenv("COOKIE_SECURE", "false").lower() == "true", samesite="strict", path=SESSION_PATH)
+
+
 def remember_sign_in(account: Student | StaffUser, request: Request, response: Response, db: Session):
     previous = request.cookies.get(SESSION_COOKIE)
     if previous:
@@ -501,10 +505,8 @@ def remember_sign_in(account: Student | StaffUser, request: Request, response: R
             db.delete(session)
     raw = secrets.token_urlsafe(32)
     db.add(RememberedSession(token_hash=digest(raw), subject_id=account.id,
-                             kind="student" if isinstance(account, Student) else "staff",
-                             expires_at=datetime.now(TZ) + timedelta(days=SESSION_DAYS)))
-    response.set_cookie(SESSION_COOKIE, raw, max_age=SESSION_DAYS * 86400, httponly=True,
-                        secure=os.getenv("COOKIE_SECURE", "false").lower() == "true", samesite="strict", path=SESSION_PATH)
+                             kind="student" if isinstance(account, Student) else "staff"))
+    set_session_cookie(response, raw)
 
 
 @app.post("/api/v1/auth/login")
@@ -530,14 +532,15 @@ def login(body: LoginInput, request: Request, response: Response, db: Session = 
 
 
 @app.get("/api/v1/auth/session")
-def restore_session(request: Request, db: Session = Depends(get_db)):
+def restore_session(request: Request, response: Response, db: Session = Depends(get_db)):
     raw = request.cookies.get(SESSION_COOKIE)
     session = db.get(RememberedSession, digest(raw)) if raw else None
-    if not session or in_local_time(session.expires_at) <= datetime.now(TZ):
+    if not session:
         raise HTTPException(401, "Sign in to continue")
     account = db.get(Student if session.kind == "student" else StaffUser, session.subject_id)
     if not account or (isinstance(account, StaffUser) and not account.is_active) or (isinstance(account, Student) and not account.password_initialized):
         raise HTTPException(401, "Sign in to continue")
+    set_session_cookie(response, raw)
     return sign_in_result(account)
 
 

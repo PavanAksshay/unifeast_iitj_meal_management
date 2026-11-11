@@ -289,3 +289,23 @@ body.admin-mode { background: #fcf7f3; color: #332a29; }
 .password-visible .password-toggle-slash {
   visibility: visible;
 }
+
+.sign-in-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin-top: 24px;
+}
+.registration-link {
+  padding: 4px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.registration-link:hover {
+  color: var(--brand);
+  text-decoration: underline;
+}

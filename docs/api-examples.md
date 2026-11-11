@@ -45,8 +45,9 @@ Content-Type: application/json
 Both passwords must match and contain 8–128 characters. Successful setup signs
 the student in. Already registered users sign in using email and password.
 
-Password sign-in and successful password setup also set a 30-day HttpOnly,
-SameSite cookie. Browsers restore their sign-in through `GET /api/v1/auth/session`
+Password sign-in and successful password setup also set an HttpOnly,
+SameSite cookie. The session remains valid until sign-out or account deactivation.
+The cookie is renewed on restoration within browser retention limits (400 days). Browsers restore their sign-in through `GET /api/v1/auth/session`
 and revoke it with `POST /api/v1/auth/logout`. API clients can continue using the
 returned access token. All authentication responses use `Cache-Control: no-store`.
 

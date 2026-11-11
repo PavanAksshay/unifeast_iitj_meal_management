@@ -10,7 +10,6 @@ body.admin-mode{background:#fdf5ef}.admin-mode .top{padding:12px 24px}.admin-mod
 <p id="auth-loading" class="sub" role="status">Checking your sign-in…</p>
 <section id="login-card" class="card hidden" style="max-width:470px;margin:auto">
   <h2>Sign in to UniFeast</h2>
-  <p class="sub">Use your registered email and password. First time here? Verify your email to set up your account.</p>
   <form id="sign-in-form" onsubmit="loginPassword(event)">
     <label class="field" for="identifier">Email address</label>
     <input id="identifier" name="username" type="email" autocomplete="username" required maxlength="254" placeholder="you@iitj.ac.in">
@@ -24,9 +23,10 @@ body.admin-mode{background:#fdf5ef}.admin-mode .top{padding:12px 24px}.admin-mod
         </svg>
       </button>
     </div>
-    <p class="sub">Keep me signed in on this browser for 30 days.</p>
-    <button class="btn" type="submit">Sign in</button>
-    <button class="btn secondary" type="button" onclick="showRegistration(true)">First-time registration</button>
+    <div class="sign-in-actions">
+      <button class="btn" type="submit">Sign in</button>
+      <button class="registration-link" type="button" onclick="showRegistration(true)">First-time registration</button>
+    </div>
   </form>
   <form id="registration-email-form" class="hidden" onsubmit="requestOtp(event)">
     <label class="field" for="registration-email">Registered email address</label>

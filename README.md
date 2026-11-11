@@ -48,7 +48,7 @@ ignored `.env` file. Automated tests mock delivery and use synthetic records.
 ## Implemented workflows
 
 - Shared role-aware email sign-in, separate email verification and password setup for first-time students, and seeded admin and finance accounts.
-- A 30-day HttpOnly, SameSite cookie remembers the browser. Only a random session secret is stored in the cookie, with its hash persisted in the database. Passwords remain salted password hashes on the server. Access tokens stay in browser memory. Sign-out revokes the remembered session.
+- An HttpOnly, SameSite cookie remembers the browser until sign-out. The server session has no automatic expiry, and the cookie is renewed on restoration. The cookie uses a rolling 400-day lifetime within browser retention limits. Clearing cookies requires a new sign-in. Only a random session secret is stored in the cookie, with its hash persisted in the database. Passwords remain salted password hashes on the server. Access tokens stay in browser memory. Sign-out revokes the remembered session.
 - Allocation eligibility checked by the API; protected selfie storage and access; server-authoritative meal timing.
 - Numbered meal references expire after 15 minutes. Student-authenticated slider confirmation creates the unique served-meal record; duplicate collection is rejected.
 - The admin portal includes rebate CSV upload, validation preview, and import history. Admin or finance staff can review each batch and approve or reject it.

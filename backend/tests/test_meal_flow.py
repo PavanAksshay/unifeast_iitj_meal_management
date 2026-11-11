@@ -252,24 +252,25 @@ class MealFlowTests(unittest.TestCase):
         with self.sessions() as db:
             self.assertEqual(db.query(OTPChallenge).count(), 0)
 
-    def test_remembered_cookie_expiry_logout_and_no_password(self):
+    def test_remembered_cookie_renewal_logout_and_no_password(self):
         login = self.client.post("/api/v1/auth/login", json={"identifier": "test@example.edu", "password": "secret"})
         self.assertEqual(login.status_code, 200)
         cookie = login.headers["set-cookie"]
         self.assertIn("HttpOnly", cookie)
         self.assertIn("SameSite=strict", cookie)
-        self.assertIn("Max-Age=2592000", cookie)
+        self.assertIn("Max-Age=34560000", cookie)
         self.assertNotIn("secret", cookie)
         self.assertEqual(login.headers["cache-control"], "no-store")
         raw = self.client.cookies.get("iitj-session")
         with self.sessions() as db:
             self.assertIsNotNone(db.get(RememberedSession, digest(raw)))
             self.assertIsNone(db.get(RememberedSession, raw))
-        self.assertEqual(self.client.get("/api/v1/auth/session").status_code, 200)
-        with self.sessions() as db:
-            db.get(RememberedSession, digest(raw)).expires_at = datetime.now(ZoneInfo("Asia/Kolkata")) - timedelta(seconds=1)
-            db.commit()
-        self.assertEqual(self.client.get("/api/v1/auth/session").status_code, 401)
+        with patch("app.main.datetime") as clock:
+            clock.now.return_value = datetime.now(ZoneInfo("Asia/Kolkata")) + timedelta(days=401)
+            restored = self.client.get("/api/v1/auth/session")
+        self.assertEqual(restored.status_code, 200)
+        self.assertIn("Max-Age=34560000", restored.headers["set-cookie"])
+        self.assertEqual(self.client.cookies.get("iitj-session"), raw)
         self.client.post("/api/v1/auth/login", json={"identifier": "test@example.edu", "password": "secret"})
         raw = self.client.cookies.get("iitj-session")
         self.assertEqual(self.client.post("/api/v1/auth/logout").status_code, 200)
